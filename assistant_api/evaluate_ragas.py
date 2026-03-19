@@ -33,8 +33,12 @@ except ImportError:
         # Fallback на старый импорт
         from ragas.metrics import faithfulness, context_precision
 
-from rag_pipeline import RAGPipeline
-from paths import DEFAULT_DATA_SOURCES, EVALUATION_CACHE_DB_PATH
+try:
+    from .rag_pipeline import RAGPipeline
+    from .paths import DEFAULT_DATA_SOURCES, EVALUATION_CACHE_DB_PATH
+except ImportError:
+    from rag_pipeline import RAGPipeline
+    from paths import DEFAULT_DATA_SOURCES, EVALUATION_CACHE_DB_PATH
 
 
 # Тестовые вопросы для оценки RAG системы

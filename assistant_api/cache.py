@@ -6,7 +6,10 @@ from typing import Optional, Dict, Any
 import logging
 from pathlib import Path
 
-from paths import DEFAULT_CACHE_DB_PATH
+try:
+    from .paths import DEFAULT_CACHE_DB_PATH
+except ImportError:
+    from paths import DEFAULT_CACHE_DB_PATH
 
 
 logger = logging.getLogger(__name__)

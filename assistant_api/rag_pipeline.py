@@ -4,9 +4,14 @@ import logging
 from pathlib import Path
 from openai import OpenAI
 
-from vector_store import VectorStore
-from cache import RAGCache
-from paths import CHROMA_DB_DIR, DEFAULT_CACHE_DB_PATH, DEFAULT_DATA_SOURCES
+try:
+    from .vector_store import VectorStore
+    from .cache import RAGCache
+    from .paths import CHROMA_DB_DIR, DEFAULT_CACHE_DB_PATH, DEFAULT_DATA_SOURCES
+except ImportError:
+    from vector_store import VectorStore
+    from cache import RAGCache
+    from paths import CHROMA_DB_DIR, DEFAULT_CACHE_DB_PATH, DEFAULT_DATA_SOURCES
 
 
 logger = logging.getLogger(__name__)

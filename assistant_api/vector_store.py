@@ -6,7 +6,10 @@ from openai import OpenAI
 from dotenv import load_dotenv
 from pathlib import Path
 
-from paths import CHROMA_DB_DIR, DATA_DIR, ENV_FILE_PATH
+try:
+    from .paths import CHROMA_DB_DIR, DATA_DIR, ENV_FILE_PATH
+except ImportError:
+    from paths import CHROMA_DB_DIR, DATA_DIR, ENV_FILE_PATH
 
 
 logger = logging.getLogger(__name__)

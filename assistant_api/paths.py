@@ -9,6 +9,7 @@ DATA_DIR = MODULE_DIR / "data"
 CHROMA_DB_DIR = PROJECT_ROOT / "chroma_db"
 DEFAULT_CACHE_DB_PATH = PROJECT_ROOT / "semantic_rag_cache_v2.db"
 EVALUATION_CACHE_DB_PATH = PROJECT_ROOT / "api_rag_cache.db"
+TELEGRAM_LOG_DB_PATH = PROJECT_ROOT / "telegram_logs.db"
 LOG_FILE_PATH = PROJECT_ROOT / "app.log"
 
 ENV_FILE_PATH = PROJECT_ROOT / ".env"

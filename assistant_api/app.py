@@ -9,9 +9,14 @@ import sys
 
 from dotenv import load_dotenv
 
-from logging_config import setup_logging
-from paths import DEFAULT_CACHE_DB_PATH, DEFAULT_DATA_SOURCES, ENV_FILE_PATH
-from rag_pipeline import RAGPipeline
+try:
+    from .logging_config import setup_logging
+    from .paths import DEFAULT_CACHE_DB_PATH, DEFAULT_DATA_SOURCES, ENV_FILE_PATH
+    from .rag_pipeline import RAGPipeline
+except ImportError:
+    from logging_config import setup_logging
+    from paths import DEFAULT_CACHE_DB_PATH, DEFAULT_DATA_SOURCES, ENV_FILE_PATH
+    from rag_pipeline import RAGPipeline
 
 
 logger = logging.getLogger(__name__)
