@@ -1,20 +1,18 @@
-"""
-Модуль работы с векторным хранилищем ChromaDB.
-Обрабатывает загрузку документов, chunking и поиск по векторам.
-"""
-
 import chromadb
-from chromadb.config import Settings
 from typing import List, Dict, Any
 import os
+import logging
 from openai import OpenAI
 from dotenv import load_dotenv
 from pathlib import Path
 
+from paths import CHROMA_DB_DIR, DATA_DIR, ENV_FILE_PATH
 
-env_path = Path(__file__).parent.parent / '.env'
-if env_path.exists():
-    load_dotenv(env_path)
+
+logger = logging.getLogger(__name__)
+
+if ENV_FILE_PATH.exists():
+    load_dotenv(ENV_FILE_PATH)
 else:
     # Пытаемся загрузить из текущей директории
     load_dotenv()
@@ -23,7 +21,7 @@ else:
 class VectorStore:
     """Векторное хранилище на основе ChromaDB."""
     
-    def __init__(self, collection_name: str = "rag_collection", persist_directory: str = "./chroma_db"):
+    def __init__(self, collection_name: str = "rag_collection", persist_directory: str | Path = CHROMA_DB_DIR):
         """
         Инициализация векторного хранилища.
         
@@ -32,21 +30,31 @@ class VectorStore:
             persist_directory: директория для хранения данных
         """
         self.collection_name = collection_name
-        self.persist_directory = persist_directory
+        self.persist_directory = Path(persist_directory).resolve()
+        self.persist_directory.mkdir(parents=True, exist_ok=True)
+        logger.info(
+            "Инициализация vector store: collection=%s, path=%s",
+            self.collection_name,
+            self.persist_directory,
+        )
         
         # Инициализация ChromaDB клиента
-        self.client = chromadb.PersistentClient(path=persist_directory)
+        self.client = chromadb.PersistentClient(path=str(self.persist_directory))
         
         # Получение или создание коллекции
         try:
             self.collection = self.client.get_collection(name=collection_name)
-            print(f"Коллекция '{collection_name}' загружена. Документов: {self.collection.count()}")
+            logger.info(
+                "Коллекция загружена: name=%s, documents=%s",
+                collection_name,
+                self.collection.count(),
+            )
         except Exception:
             self.collection = self.client.create_collection(
                 name=collection_name,
                 metadata={"hnsw:space": "cosine"}
             )
-            print(f"Создана новая коллекция '{collection_name}'")
+            logger.info("Создана новая коллекция: %s", collection_name)
         
         # OpenAI клиент для создания embeddings
         self.openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -217,69 +225,6 @@ class VectorStore:
         chunks = [chunk for chunk in chunks if len(chunk) >= 50]
         
         return chunks
-        """
-        Умное разбиение текста на чанки с учётом семантики.
-        
-        Стратегия:
-        1. Приоритет абзацам (разделение по \n\n)
-        2. Разбиение длинных абзацев по предложениям
-        3. Сохранение контекста через overlap
-        4. Учёт минимального и максимального размера чанка
-        
-        Args:
-            text: исходный текст
-            chunk_size: целевой размер чанка в символах
-            overlap: размер перекрытия между чанками
-            
-        Returns:
-            список чанков
-        """
-        # Разделяем текст на абзацы
-        paragraphs = text.split('\n\n')
-        
-        chunks = []
-        current_chunk = ""
-        
-        for paragraph in paragraphs:
-            paragraph = paragraph.strip()
-            if not paragraph:
-                continue
-            
-            # Если абзац помещается в текущий чанк
-            if len(current_chunk) + len(paragraph) + 2 <= chunk_size:
-                if current_chunk:
-                    current_chunk += "\n\n" + paragraph
-                else:
-                    current_chunk = paragraph
-            
-            # Если текущий чанк не пустой и добавление абзаца превысит размер
-            elif current_chunk:
-                chunks.append(current_chunk)
-                # Добавляем overlap из конца предыдущего чанка
-                overlap_text = self._get_overlap_text(current_chunk, overlap)
-                current_chunk = overlap_text + "\n\n" + paragraph if overlap_text else paragraph
-            
-            # Если абзац слишком большой, разбиваем его на предложения
-            else:
-                if len(paragraph) > chunk_size:
-                    # Разбиваем длинный абзац на предложения
-                    sentence_chunks = self._split_long_paragraph(paragraph, chunk_size, overlap)
-                    
-                    # Добавляем все чанки кроме последнего
-                    if sentence_chunks:
-                        chunks.extend(sentence_chunks[:-1])
-                        current_chunk = sentence_chunks[-1]
-                else:
-                    current_chunk = paragraph
-        
-        # Добавляем последний чанк
-        if current_chunk:
-            chunks.append(current_chunk)
-        
-        # Пост-обработка: фильтруем слишком короткие чанки
-        chunks = [chunk for chunk in chunks if len(chunk) >= 50]
-        
-        return chunks
     
     def _get_overlap_text(self, text: str, overlap_size: int) -> str:
         """
@@ -379,48 +324,60 @@ class VectorStore:
             file_path: путь к файлу с документами
             source: источник документов (например, "docs", "python")
         """
+        file_path = Path(file_path).resolve()
+        logger.info("Начало индексации источника: source=%s, file=%s", source, file_path)
+
         # Проверка существования файла
-        if not os.path.exists(file_path):
+        if not file_path.exists():
             raise FileNotFoundError(f"Файл {file_path} не найден")
-        
-        # Чтение файла
-        with open(file_path, 'r', encoding='utf-8') as f:
-            text = f.read()
-        
-        # Разбиение на чанки с учётом источника
-        chunks = self._chunk_text_semantic(text, source)
-        print(f"Текст из {source} разбит на {len(chunks)} концептуальных чанков")
-        
-        # Создание embeddings и добавление в ChromaDB
-        documents = []
-        ids = []
-        embeddings = []
-        metadatas = []
-        
-        # Получаем текущее количество документов для уникальных ID
-        current_count = self.collection.count()
-        
-        for i, chunk in enumerate(chunks):
-            # Создание embedding через OpenAI
-            embedding = self._create_embedding(chunk)
+
+        try:
+            # Чтение файла
+            with file_path.open('r', encoding='utf-8') as f:
+                text = f.read()
             
-            documents.append(chunk)
-            ids.append(f"{source}_{current_count + i}")
-            embeddings.append(embedding)
-            metadatas.append({"source": source, "file_path": file_path})
+            # Разбиение на чанки с учётом источника
+            chunks = self._chunk_text_semantic(text, source)
+            logger.info("Подготовлены чанки для индексации: source=%s, chunks=%s", source, len(chunks))
             
-            if (i + 1) % 10 == 0:
-                print(f"Обработано {i + 1}/{len(chunks)} чанков из {source}")
-        
-        # Добавление в ChromaDB батчами
-        self.collection.add(
-            documents=documents,
-            embeddings=embeddings,
-            ids=ids,
-            metadatas=metadatas
-        )
-        
-        print(f"Загружено {len(chunks)} документов из источника '{source}' в коллекцию '{self.collection_name}'")
+            # Создание embeddings и добавление в ChromaDB
+            documents = []
+            ids = []
+            embeddings = []
+            metadatas = []
+            
+            # Получаем текущее количество документов для уникальных ID
+            current_count = self.collection.count()
+            
+            for i, chunk in enumerate(chunks):
+                # Создание embedding через OpenAI
+                embedding = self._create_embedding(chunk)
+                
+                documents.append(chunk)
+                ids.append(f"{source}_{current_count + i}")
+                embeddings.append(embedding)
+                metadatas.append({"source": source, "file_path": str(file_path)})
+                
+                if (i + 1) % 10 == 0:
+                    logger.debug("Проиндексировано чанков: source=%s, progress=%s/%s", source, i + 1, len(chunks))
+            
+            if documents:
+                self.collection.add(
+                    documents=documents,
+                    embeddings=embeddings,
+                    ids=ids,
+                    metadatas=metadatas
+                )
+
+            logger.info(
+                "Индексация завершена: collection=%s, source=%s, documents=%s",
+                self.collection_name,
+                source,
+                len(chunks),
+            )
+        except Exception:
+            logger.exception("Ошибка индексации источника: source=%s", source)
+            raise
     
     def _create_embedding(self, text: str) -> List[float]:
         """
@@ -446,8 +403,17 @@ class VectorStore:
             sources: словарь {источник: путь_к_файлу}
         """
         for source, file_path in sources.items():
-            print(f"\nЗагрузка источника '{source}' из {file_path}...")
             self.load_documents(file_path, source)
+
+    def reset_collection(self):
+        """Полное удаление и пересоздание коллекции для принудительной переиндексации."""
+        logger.warning("Принудительный сброс коллекции перед переиндексацией: %s", self.collection_name)
+        self.client.delete_collection(name=self.collection_name)
+        self.collection = self.client.create_collection(
+            name=self.collection_name,
+            metadata={"hnsw:space": "cosine"}
+        )
+        logger.info("Коллекция пересоздана: %s", self.collection_name)
     
     def search(self, query: str, top_k: int = 3, source_filter: str = None) -> List[Dict[str, Any]]:
         """
@@ -461,35 +427,42 @@ class VectorStore:
         Returns:
             список документов с метаданными
         """
-        # Создание embedding для запроса
-        query_embedding = self._create_embedding(query)
-        
-        # Подготовка фильтра метаданных
-        where_filter = None
-        if source_filter:
-            where_filter = {"source": source_filter}
-        
-        # Поиск в ChromaDB
-        results = self.collection.query(
-            query_embeddings=[query_embedding],
-            n_results=top_k,
-            where=where_filter
-        )
-        
-        # Форматирование результатов
-        documents = []
-        if results['documents'] and len(results['documents']) > 0:
-            for i in range(len(results['documents'][0])):
-                doc_metadata = results['metadatas'][0][i] if 'metadatas' in results and results['metadatas'] else {}
-                documents.append({
-                    'id': results['ids'][0][i],
-                    'text': results['documents'][0][i],
-                    'distance': results['distances'][0][i] if 'distances' in results else None,
-                    'source': doc_metadata.get('source', 'unknown'),
-                    'file_path': doc_metadata.get('file_path', 'unknown')
-                })
-        
-        return documents
+        logger.info("Поиск в vector store: top_k=%s, source_filter=%s", top_k, source_filter or "all")
+        try:
+            # Создание embedding для запроса
+            query_embedding = self._create_embedding(query)
+            
+            # Подготовка фильтра метаданных
+            where_filter = None
+            if source_filter:
+                where_filter = {"source": source_filter}
+            
+            # Поиск в ChromaDB
+            results = self.collection.query(
+                query_embeddings=[query_embedding],
+                n_results=top_k,
+                where=where_filter
+            )
+            
+            # Форматирование результатов
+            documents = []
+            if results['documents'] and len(results['documents']) > 0:
+                for i in range(len(results['documents'][0])):
+                    doc_metadata = results['metadatas'][0][i] if 'metadatas' in results and results['metadatas'] else {}
+                    documents.append({
+                        'id': results['ids'][0][i],
+                        'text': results['documents'][0][i],
+                        'distance': results['distances'][0][i] if 'distances' in results else None,
+                        'source': doc_metadata.get('source', 'unknown'),
+                        'file_path': doc_metadata.get('file_path', 'unknown')
+                    })
+
+            logger.info("Поиск завершён: results=%s", len(documents))
+            logger.debug("Источники найденных документов: %s", [doc["source"] for doc in documents])
+            return documents
+        except Exception:
+            logger.exception("Ошибка поиска в vector store")
+            raise
     
     def get_collection_stats(self) -> Dict[str, Any]:
         """
@@ -513,7 +486,7 @@ class VectorStore:
         return {
             'name': self.collection_name,
             'count': total_count,
-            'persist_directory': self.persist_directory,
+            'persist_directory': str(self.persist_directory),
             'sources': sources_stats
         }
 
@@ -529,8 +502,9 @@ if __name__ == "__main__":
     vector_store = VectorStore(collection_name="test_collection")
     
     # Загрузка документов
-    if os.path.exists("data/docs.txt"):
-        vector_store.load_documents("data/docs.txt")
+    docs_path = DATA_DIR / "docs.txt"
+    if docs_path.exists():
+        vector_store.load_documents(docs_path)
     
     # Поиск
     results = vector_store.search("Что такое машинное обучение?", top_k=3)

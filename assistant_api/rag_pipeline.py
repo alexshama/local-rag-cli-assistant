@@ -1,14 +1,15 @@
-"""
-Основной RAG pipeline для API режима.
-Управляет потоком: запрос -> кеш -> vector search -> LLM -> ответ -> кеш.
-"""
-
 from typing import Dict, Any, List
 import os
+import logging
+from pathlib import Path
 from openai import OpenAI
 
 from vector_store import VectorStore
 from cache import RAGCache
+from paths import CHROMA_DB_DIR, DEFAULT_CACHE_DB_PATH, DEFAULT_DATA_SOURCES
+
+
+logger = logging.getLogger(__name__)
 
 
 class RAGPipeline:
@@ -16,9 +17,10 @@ class RAGPipeline:
     
     def __init__(self, 
                  collection_name: str = "rag_collection",
-                 cache_db_path: str = "rag_cache.db",
-                 data_sources: Dict[str, str] = None,
-                 model: str = "gpt-4o-mini"):
+                 cache_db_path: str | Path = DEFAULT_CACHE_DB_PATH,
+                 data_sources: Dict[str, str | Path] | None = None,
+                 model: str = "gpt-4o-mini",
+                 force_reindex: bool = False):
         """
         Инициализация RAG pipeline.
         
@@ -27,6 +29,7 @@ class RAGPipeline:
             cache_db_path: путь к базе данных кеша
             data_sources: словарь источников {название: путь_к_файлу}
             model: модель OpenAI для генерации ответов
+            force_reindex: принудительно пересоздать индекс перед загрузкой данных
         """
         # Проверка API ключа
         if not os.getenv("OPENAI_API_KEY"):
@@ -34,23 +37,43 @@ class RAGPipeline:
         
         self.model = model
         self.openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        self.data_sources = {
+            name: Path(path).resolve() for name, path in (data_sources or DEFAULT_DATA_SOURCES).items()
+        }
         
         # Инициализация компонентов
-        print("Инициализация векторного хранилища...")
-        self.vector_store = VectorStore(collection_name=collection_name)
+        logger.info("Инициализация RAG pipeline: model=%s, collection=%s", self.model, collection_name)
+        self.vector_store = VectorStore(
+            collection_name=collection_name,
+            persist_directory=CHROMA_DB_DIR,
+        )
         
         # Загрузка документов из источников, если коллекция пустая
-        if self.vector_store.collection.count() == 0 and data_sources:
-            print("Загрузка документов из источников...")
-            self.vector_store.load_multiple_sources(data_sources)
-        elif data_sources:
-            print("Документы уже загружены в коллекцию")
+        if force_reindex:
+            logger.warning("Включена принудительная переиндексация")
+            self.vector_store.reset_collection()
+            self.vector_store.load_multiple_sources(self.data_sources)
+        elif self.vector_store.collection.count() == 0 and self.data_sources:
+            logger.info("Коллекция пуста, запускается первичная индексация")
+            self.vector_store.load_multiple_sources(self.data_sources)
+        elif self.data_sources:
+            logger.info("Индексация пропущена: коллекция уже содержит документы")
         
-        print("Инициализация кеша...")
         self.cache = RAGCache(db_path=cache_db_path)
-        
-        print("RAG Pipeline инициализирован (API mode)")
-    
+        logger.info("RAG pipeline инициализирован")
+
+        if force_reindex:
+            logger.warning("Очистка cache после принудительной переиндексации")
+            self.cache.clear()
+
+    def reindex(self):
+        """Явная принудительная переиндексация всех источников."""
+        logger.warning("Запущена явная переиндексация всех источников")
+        self.vector_store.reset_collection()
+        self.vector_store.load_multiple_sources(self.data_sources)
+        logger.warning("Очистка cache после явной переиндексации")
+        self.cache.clear()
+
     def _create_prompt(self, query: str, context_docs: List[Dict[str, Any]], source_filter: str = None) -> str:
         """
         Создание промпта для LLM с контекстом.
@@ -115,7 +138,7 @@ class RAGPipeline:
         )
         
         return response.choices[0].message.content.strip()
-    
+
     def query(self, user_query: str, use_cache: bool = True, source_filter: str = None) -> Dict[str, Any]:
         """
         Основной метод для обработки запроса пользователя через API.
@@ -135,67 +158,67 @@ class RAGPipeline:
         Returns:
             словарь с ответом и метаданными
         """
-        print(f"\n{'='*60}")
-        print(f"Запрос: {user_query}")
-        if source_filter:
-            print(f"Фильтр по источнику: {source_filter}")
-        print(f"{'='*60}")
+        logger.info(
+            "Начало обработки запроса: query_length=%s, source_filter=%s",
+            len(user_query),
+            source_filter or "all",
+        )
         
         # Создаём ключ кеша с учётом фильтра источника
         cache_key = f"{user_query}|source:{source_filter}" if source_filter else user_query
         
-        # Шаг 1: Проверка кеша
-        if use_cache:
-            print("[*] Проверка кеша...")
-            cached_result = self.cache.get(cache_key)
+        try:
+            # Шаг 1: Проверка кеша
+            if use_cache:
+                logger.info("Проверка cache")
+                cached_result = self.cache.get(cache_key)
+                
+                if cached_result:
+                    return {
+                        "query": user_query,
+                        "answer": cached_result["answer"],
+                        "from_cache": True,
+                        "context_docs": cached_result.get("context_docs", []),
+                        "cached_at": cached_result.get("created_at"),
+                        "source_filter": source_filter
+                    }
             
-            if cached_result:
-                print("[+] Ответ найден в кеше")
-                return {
-                    "query": user_query,
-                    "answer": cached_result["answer"],
-                    "from_cache": True,
-                    "context_docs": cached_result.get("context"),
-                    "cached_at": cached_result.get("created_at"),
-                    "source_filter": source_filter
-                }
-            else:
-                print("[-] Ответ не найден в кеше")
-        
-        # Шаг 2: Поиск релевантных документов
-        print("[*] Поиск релевантных документов через API...")
-        context_docs = self.vector_store.search(user_query, top_k=3, source_filter=source_filter)
-        print(f"[+] Найдено {len(context_docs)} релевантных документов")
-        
-        if context_docs and source_filter:
-            sources_found = set(doc.get('source', 'unknown') for doc in context_docs)
-            print(f"[+] Источники в результатах: {', '.join(sources_found)}")
-        
-        # Шаг 3: Формирование промпта
-        print("[*] Формирование промпта...")
-        prompt = self._create_prompt(user_query, context_docs, source_filter)
-        
-        # Шаг 4: Генерация ответа через API
-        print(f"[*] Генерация ответа через OpenAI API ({self.model})...")
-        answer = self._generate_answer(prompt)
-        print("[+] Ответ получен от API")
-        
-        # Шаг 5: Сохранение в кеш
-        if use_cache:
-            print("[*] Сохранение в кеш...")
-            context_for_cache = [doc['text'] for doc in context_docs]
-            self.cache.set(cache_key, answer, context_for_cache)
-            print("[+] Сохранено в кеш")
-        
-        return {
-            "query": user_query,
-            "answer": answer,
-            "from_cache": False,
-            "context_docs": context_docs,
-            "model": self.model,
-            "mode": "API",
-            "source_filter": source_filter
-        }
+            # Шаг 2: Поиск релевантных документов
+            logger.info("Запуск поиска в vector store")
+            context_docs = self.vector_store.search(user_query, top_k=3, source_filter=source_filter)
+            logger.info("Найдено релевантных чанков: %s", len(context_docs))
+            
+            if context_docs and source_filter:
+                sources_found = sorted({doc.get('source', 'unknown') for doc in context_docs})
+                logger.debug("Источники в результатах: %s", ", ".join(sources_found))
+            
+            # Шаг 3: Формирование промпта
+            logger.info("Формирование контекста и промпта")
+            prompt = self._create_prompt(user_query, context_docs, source_filter)
+            
+            # Шаг 4: Генерация ответа через API
+            logger.info("Отправка запроса в OpenAI: model=%s", self.model)
+            answer = self._generate_answer(prompt)
+            logger.info("Ответ от OpenAI успешно получен")
+            
+            # Шаг 5: Сохранение в кеш
+            if use_cache:
+                logger.info("Сохранение результата в cache")
+                self.cache.set(cache_key, answer, context_docs)
+            
+            logger.info("Обработка запроса завершена")
+            return {
+                "query": user_query,
+                "answer": answer,
+                "from_cache": False,
+                "context_docs": context_docs,
+                "model": self.model,
+                "mode": "API",
+                "source_filter": source_filter
+            }
+        except Exception:
+            logger.exception("Ошибка обработки запроса в RAG pipeline")
+            raise
     
     def get_stats(self) -> Dict[str, Any]:
         """
@@ -249,4 +272,3 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"Ошибка: {e}")
         sys.exit(1)
-

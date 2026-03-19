@@ -34,6 +34,7 @@ except ImportError:
         from ragas.metrics import faithfulness, context_precision
 
 from rag_pipeline import RAGPipeline
+from paths import DEFAULT_DATA_SOURCES, EVALUATION_CACHE_DB_PATH
 
 
 # Тестовые вопросы для оценки RAG системы
@@ -146,15 +147,10 @@ def evaluate_rag_system():
         print("[*] Инициализация RAG системы (API mode)...\n")
         
         # Определяем источники данных (как в обновлённой версии)
-        data_sources = {
-            "docs": "assistant_api/data/docs.txt",
-            "python": "assistant_api/data/python.txt"
-        }
-        
         pipeline = RAGPipeline(
             collection_name="api_rag_collection",
-            cache_db_path="assistant_api/api_rag_cache.db",
-            data_sources=data_sources,
+            cache_db_path=EVALUATION_CACHE_DB_PATH,
+            data_sources=DEFAULT_DATA_SOURCES,
             model="gpt-4o-mini"
         )
         print("\n[OK] RAG система готова к оценке\n")
@@ -298,4 +294,3 @@ def print_results_comparison(result_general, result_python, questions_general, q
 
 if __name__ == "__main__":
     evaluate_rag_system()
-
